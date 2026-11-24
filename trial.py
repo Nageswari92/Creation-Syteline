@@ -92,3 +92,16 @@ def resolve_openpyxl_color(color_obj, theme_colors, is_bg=True):
             hex_val = rgb[2:].upper() if len(rgb) == 8 else rgb.upper()
             if is_bg and hex_val in ("FFFFFF", "000000"):
                 return None
+            if not is_bg and hex_val == "000000":
+                return None
+            return hex_val
+    return None
+
+
+def get_cell_style(wb, sh, r, c, is_xls, theme_colors=None):
+    bg_hex, font_hex = None, None
+    try:
+        if is_xls:
+            xf = wb.xf_list[sh.cell_xf_index(r, c)]
+            if xf.background.fill_pattern != 0:
+                bg_idx =
