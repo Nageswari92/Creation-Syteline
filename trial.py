@@ -138,3 +138,81 @@ def extract_bom_data(bom_file):
 
     meta = dict(customer_id="", ship_site="")
     hdr_idx = None
+    for r in range(min(20, len(df))):
+        rvals = [clean_header(v) for v in df.iloc[r]]
+        for c, val in enumerate(rvals):
+            for key, label in [("customer_id", "customer id"), ("ship_site", "ship site")]:
+                if label in val:
+                    for off in range(1, 4):
+                        if c + off < len(df.columns) and pd.notna(df.iloc[r, c + off]):
+                            meta[key] = str(df.iloc[r, c + off]).strip()
+                            break
+        if any("vse item" in v for v in rvals) and any("manufacturer" in v for v in rvals):
+            hdr_idx = r
+            break
+
+    if hdr_idx is None:
+        raise ValueError("Could not find 'VSE Item' and 'Manufacturer' headers in the BOM file.")
+
+    bh = [clean_header(v) for v in df.iloc[hdr_idx]]
+    cmap = dict()
+    rules = [
+        ("lvl", lambda h: h == "lvl"), ("vse_item", lambda h: h == "vse item"),
+        ("cust_item", lambda h: h == "cust item"), ("description", lambda h: h == "description"),
+        ("manufacturer", lambda h: h == "manufacturer"), ("mpn", lambda h: "manufacturer p/n" in h or "mpn" in h),
+        ("mfg_id", lambda h: "manufacturer id" in h), ("planner", lambda h: "planner" in h),
+        ("vendor_id", lambda h: "vendor id" in h), ("unit_cost", lambda h: "unit cost" in h),
+    ]
+    for idx, h in enumerate(bh):
+        for k, fn in rules:
+            if k not in cmap and fn(h):
+                cmap[k] = idx
+
+    priority_cols = [cmap[k] for k in ["mpn", "vse_item", "manufacturer", "description", "lvl"] if k in cmap]
+    other_cols = [c for c in range(len(bh)) if c not in priority_cols]
+    cols_to_check = priority_cols + other_cols
+
+    last_row = hdr_idx
+    for r in range(hdr_idx + 1, len(df)):
+        if any(pd.notna(df.iloc[r, cmap[k]]) and str(df.iloc[r, cmap[k]]).strip() != "" for k in ["lvl", "vse_item", "manufacturer", "mpn"] if k in cmap):
+            last_row = r
+
+    records, parent = [], dict()
+    for r in range(hdr_idx + 1, last_row + 1):
+        row = df.iloc[r]
+        val = lambda k: ("" if (str(row[cmap[k]]).strip() == "0" and k == "vendor_id") else str(row[cmap[k]]).strip()) if (k in cmap and pd.notna(row[cmap[k]])) else ""
+        lvl, vse, mfg, mpn = val("lvl"), val("vse_item"), val("manufacturer"), val("mpn")
+        
+        bg, fg = get_row_styles(wb_fmt, sh_fmt, r, cols_to_check, is_xls, theme_colors)
+
+        if not lvl and not vse and not mfg and not mpn:
+            parent = dict()
+            records.append(dict(bg_hex=bg, font_hex=fg))
+            continue
+
+        if lvl or vse:
+            rc = row[cmap["unit_cost"]] if "unit_cost" in cmap and pd.notna(row[cmap["unit_cost"]]) else ""
+            parent = {
+                "vse item": vse, "cust item": val("cust_item"), "description": val("description"),
+                "planner codes": val("planner"), "vendor id": val("vendor_id"), "unit cost": rc if rc != 0 else ""
+            }
+
+        has_part = bool(vse or mpn or mfg)
+        records.append({
+            "manufacturer id": val("mfg_id"), "manufacturer p/n": mpn, "manufatures": mfg, "manufacturer": mfg,
+            "vse item": parent.get("vse item", ""), "description": parent.get("description", ""),
+            "unit cost": parent.get("unit cost", ""), "planner codes": parent.get("planner codes", ""),
+            "customer id": meta["customer_id"] if has_part else "", "cust item": parent.get("cust item", ""),
+            "vendor id pricing from": parent.get("vendor id", ""), "vendor id": parent.get("vendor id", ""),
+            "stock location": meta["ship_site"] if has_part else "", "bg_hex": bg, "font_hex": fg
+        })
+    return records
+
+def fill_trial_template(trial_file, records):
+    wb = openpyxl.load_workbook(trial_file)
+    ws = wb.active
+    th = [clean_header(ws.cell(1, c).value) for c in range(1, ws.max_column + 1)]
+    sec = set(["main", "planning", "controls", "vse", "item coset", "item cost", "customer contract", "item mfgr"])
+    bf = copy(ws.cell(2, 1).font) if ws.max_row >= 2 else Font(name="Calibri", size=11)
+
+    for r_idx, rec in enumerate(records, start=2):
