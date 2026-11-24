@@ -68,9 +68,9 @@ def resolve_openpyxl_color(color_obj, theme_colors, is_bg=True):
         rgb = str(color_obj.rgb)
         if len(rgb) == 8:
             alpha, hex_val = rgb[:2], rgb[2:].upper()
-            if alpha == "00" and hex_val == "000000":
+            if alpha == "00":
                 return None
-            if is_bg and hex_val == "FFFFFF":
+            if is_bg and hex_val in ("FFFFFF", "000000"):
                 return None
             if not is_bg and hex_val == "000000":
                 return None
@@ -87,6 +87,8 @@ def resolve_openpyxl_color(color_obj, theme_colors, is_bg=True):
             return final_hex
     elif ctype == "indexed":
         idx = color_obj.indexed
+        if idx in (64, 65):
+            return None
         if 0 <= idx < len(COLOR_INDEX):
             rgb = COLOR_INDEX[idx]
             hex_val = rgb[2:].upper() if len(rgb) == 8 else rgb.upper()
@@ -103,18 +105,20 @@ def get_cell_style(wb, sh, r, c, is_xls, theme_colors=None):
     try:
         if is_xls:
             xf = wb.xf_list[sh.cell_xf_index(r, c)]
-            if xf.background.fill_pattern != 0:
+            if xf.background.fill_pattern == 1:
                 bg_idx = xf.background.pattern_colour_index
-                b_col = rgb_to_hex(wb.colour_map.get(bg_idx))
-                if b_col and b_col != "FFFFFF" and bg_idx not in (64, 65):
-                    bg_hex = b_col
+                if bg_idx not in (64, 65, 9, 8):
+                    b_col = rgb_to_hex(wb.colour_map.get(bg_idx))
+                    if b_col and b_col not in ("FFFFFF", "000000"):
+                        bg_hex = b_col
             font = wb.font_list[xf.font_index]
-            f_col = rgb_to_hex(wb.colour_map.get(font.colour_index))
-            if f_col and f_col != "000000" and font.colour_index not in (32767, 8, 64):
-                font_hex = f_col
+            if font.colour_index not in (32767, 8, 64):
+                f_col = rgb_to_hex(wb.colour_map.get(font.colour_index))
+                if f_col and f_col != "000000":
+                    font_hex = f_col
         else:
             cell = sh.cell(row=r + 1, column=c + 1)
-            if cell.fill and cell.fill.fill_type not in (None, "none"):
+            if cell.fill and cell.fill.fill_type == "solid":
                 bg_hex = resolve_openpyxl_color(cell.fill.start_color, theme_colors, is_bg=True)
             if cell.font and cell.font.color:
                 font_hex = resolve_openpyxl_color(cell.font.color, theme_colors, is_bg=False)
@@ -123,26 +127,20 @@ def get_cell_style(wb, sh, r, c, is_xls, theme_colors=None):
     return bg_hex, font_hex
 
 
-def get_row_styles_map(wb, sh, r, cmap, total_cols, is_xls, theme_colors=None):
+def get_row_styles_map(wb, sh, r, cmap, is_xls, theme_colors=None):
     cell_styles = {}
-    fallback_bg, fallback_fg = None, None
-
-    priority_keys = ["mpn", "vse_item", "manufacturer", "description", "lvl"]
-    priority_cols = [cmap[k] for k in priority_keys if k in cmap]
-    other_cols = [c for c in range(total_cols) if c not in priority_cols]
-
-    for c in priority_cols + other_cols:
-        bg, fg = get_cell_style(wb, sh, r, c, is_xls, theme_colors)
-        if bg and not fallback_bg:
-            fallback_bg = bg
-        if fg and not fallback_fg:
-            fallback_fg = fg
-
     for key, col_idx in cmap.items():
         bg, fg = get_cell_style(wb, sh, r, col_idx, is_xls, theme_colors)
-        cell_styles[key] = (bg or fallback_bg, fg or fallback_fg)
+        cell_styles[key] = (bg, fg)
 
-    cell_styles["_row_default"] = (fallback_bg, fallback_fg)
+    # For unmapped columns (like Customer ID / Stock Location), only apply color if ALL main data columns share the exact same fill
+    main_keys = [k for k in ["vse_item", "description", "manufacturer", "mpn"] if k in cell_styles]
+    main_bgs = [cell_styles[k][0] for k in main_keys]
+    main_fgs = [cell_styles[k][1] for k in main_keys]
+
+    row_bg = main_bgs[0] if (main_bgs and all(b == main_bgs[0] and b is not None for b in main_bgs)) else None
+    row_fg = main_fgs[0] if (main_fgs and all(f == main_fgs[0] and f is not None for f in main_fgs)) else None
+    cell_styles["_row_default"] = (row_bg, row_fg)
     return cell_styles
 
 
@@ -210,7 +208,7 @@ def extract_bom_data(bom_file):
         val = lambda k: ("" if (str(row[cmap[k]]).strip() == "0" and k == "vendor_id") else str(row[cmap[k]]).strip()) if (k in cmap and pd.notna(row[cmap[k]])) else ""
         lvl, vse, mfg, mpn = val("lvl"), val("vse_item"), val("manufacturer"), val("mpn")
 
-        styles_map = get_row_styles_map(wb_fmt, sh_fmt, r, cmap, len(bh), is_xls, theme_colors)
+        styles_map = get_row_styles_map(wb_fmt, sh_fmt, r, cmap, is_xls, theme_colors)
 
         if not lvl and not vse and not mfg and not mpn:
             parent = dict()
