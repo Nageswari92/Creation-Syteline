@@ -2,8 +2,10 @@ import streamlit as st
 import pandas as pd
 import openpyxl
 from openpyxl.styles import PatternFill, Font
+from openpyxl.styles.colors import COLOR_INDEX
 from copy import copy
 from io import BytesIO
+import xml.etree.ElementTree as ET
 import xlrd
 import re
 
@@ -32,7 +34,6 @@ def get_xlsx_theme_colors(wb):
     theme_colors = ["FFFFFF", "000000", "E7E6E6", "44546A", "4472C4", "ED7D31", "A5A5A5", "FFC000", "5B9BD5", "70AD47"]
     try:
         if wb.loaded_theme:
-            import xml.etree.ElementTree as ET
             root = ET.fromstring(wb.loaded_theme)
             ns = {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'}
             clr_scheme = root.find('.//a:clrScheme', ns)
@@ -61,4 +62,79 @@ def resolve_openpyxl_color(color_obj, theme_colors, is_bg=True):
     if ctype == "rgb":
         rgb = str(color_obj.rgb)
         if len(rgb) == 8:
-            alpha, hex_val = rgb[:2],
+            alpha, hex_val = rgb[:2], rgb[2:].upper()
+            if alpha == "00" and hex_val == "000000":
+                return None
+            if is_bg and hex_val == "FFFFFF":
+                return None
+            if not is_bg and hex_val == "000000":
+                return None
+            return hex_val
+    elif ctype == "theme":
+        idx = color_obj.theme
+        if 0 <= idx < len(theme_colors):
+            base_hex = theme_colors[idx]
+            final_hex = apply_tint(base_hex, getattr(color_obj, "tint", 0.0))
+            if is_bg and final_hex == "FFFFFF":
+                return None
+            if not is_bg and final_hex == "000000":
+                return None
+            return final_hex
+    elif ctype == "indexed":
+        idx = color_obj.indexed
+        if 0 <= idx < len(COLOR_INDEX):
+            rgb = COLOR_INDEX[idx]
+            hex_val = rgb[2:].upper() if len(rgb) == 8 else rgb.upper()
+            if is_bg and hex_val in ("FFFFFF", "000000"):
+                return None
+            if not is_bg and hex_val == "000000":
+                return None
+            return hex_val
+    return None
+
+def get_row_styles(wb, sh, r, cols_to_check, is_xls, theme_colors=None):
+    bg_hex, font_hex = None, None
+    for c in cols_to_check:
+        try:
+            if is_xls:
+                xf = wb.xf_list[sh.cell_xf_index(r, c)]
+                if not bg_hex and xf.background.fill_pattern != 0:
+                    bg_idx = xf.background.pattern_colour_index
+                    b_col = rgb_to_hex(wb.colour_map.get(bg_idx))
+                    if b_col and b_col not in ("FFFFFF", "000000") and bg_idx not in (64, 65, 9):
+                        bg_hex = b_col
+                if not font_hex:
+                    font = wb.font_list[xf.font_index]
+                    f_col = rgb_to_hex(wb.colour_map.get(font.colour_index))
+                    if f_col and f_col != "000000" and font.colour_index not in (32767, 8, 64):
+                        font_hex = f_col
+            else:
+                cell = sh.cell(row=r + 1, column=c + 1)
+                if not bg_hex and cell.fill and cell.fill.fill_type not in (None, "none"):
+                    bg_hex = resolve_openpyxl_color(cell.fill.start_color, theme_colors, is_bg=True)
+                if not font_hex and cell.font and cell.font.color:
+                    font_hex = resolve_openpyxl_color(cell.font.color, theme_colors, is_bg=False)
+        except Exception:
+            continue
+        if bg_hex and font_hex:
+            break
+    return bg_hex, font_hex
+
+def extract_bom_data(bom_file):
+    fb = bom_file.getvalue()
+    is_xls = bom_file.name.lower().endswith(".xls")
+    xls_pd = pd.ExcelFile(BytesIO(fb))
+    sname = next((s for s in xls_pd.sheet_names if "vse_bom" in s.lower() or "bom" in s.lower()), xls_pd.sheet_names[0])
+    df = pd.read_excel(xls_pd, sheet_name=sname, header=None)
+
+    theme_colors = None
+    if is_xls:
+        wb_fmt = xlrd.open_workbook(file_contents=fb, formatting_info=True)
+        sh_fmt = wb_fmt.sheet_by_name(sname)
+    else:
+        wb_fmt = openpyxl.load_workbook(BytesIO(fb), data_only=True)
+        sh_fmt = wb_fmt[sname]
+        theme_colors = get_xlsx_theme_colors(wb_fmt)
+
+    meta = dict(customer_id="", ship_site="")
+    hdr_idx = None
